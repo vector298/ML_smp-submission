@@ -1,0 +1,485 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "id": "2c301aeb",
+   "metadata": {},
+   "source": [
+    "# Session 05 Assignment — Generative Adversarial Networks\n",
+    "### IET CIPHER · NITK · Summer Mentorship Program 2026\n",
+    "---\n",
+    "\n",
+    "**Mentor:** Sanskruti &nbsp;|&nbsp; \n",
+    "> **How to use this notebook**\n",
+    "> - Read each question carefully before writing anything.\n",
+    "> - Fill in code wherever you see `# YOUR CODE HERE`.\n",
+    "> - Fill in written answers wherever you see `YOUR ANSWER HERE`.\n",
+    "> - **Run every cell** before submitting — the notebook must execute top-to-bottom without errors.\n",
+    "\n",
+    "---\n",
+    "\n",
+    "| | |\n",
+    "|---|---|\n",
+    "| **Name** | *(Ishaan Roy)* |\n",
+    "| **Roll No.** | *(251MN021)* |\n",
+    "| **Date** | *(11/06/26)* |\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "15d3a058",
+   "metadata": {},
+   "source": [
+    "---\n",
+    "## Setup — Run This First\n",
+    "\n",
+    "Run the cell below before attempting any question. It imports all libraries and sets the random seed.\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "f0a648b8",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "\n",
+    "import torch\n",
+    "import torch.nn as nn\n",
+    "import torch.optim as optim\n",
+    "from torchvision import datasets, transforms\n",
+    "from torchvision.utils import make_grid\n",
+    "import matplotlib.pyplot as plt\n",
+    "import matplotlib.gridspec as gridspec\n",
+    "import numpy as np\n",
+    "from sklearn.cluster import KMeans   # used in Q4\n",
+    "\n",
+    "torch.manual_seed(42)\n",
+    "np.random.seed(42)\n",
+    "\n",
+    "device = torch.device(\"cuda\" if torch.cuda.is_available() else \"cpu\")\n",
+    "print(f\" Device  : {device}\")\n",
+    "print(f\"   PyTorch : {torch.__version__}\")\n",
+    "\n",
+    "def show_grid(tensor, nrow=8, title=\"\", figsize=(10, 4)):\n",
+    "    \"\"\"Display a batch of image tensors as a grid.\"\"\"\n",
+    "    grid = make_grid(tensor[:nrow*2].view(-1, 1, 28, 28),\n",
+    "                     nrow=nrow, normalize=True, value_range=(-1, 1))\n",
+    "    plt.figure(figsize=figsize)\n",
+    "    plt.imshow(grid.permute(1, 2, 0).cpu().numpy(), cmap=\"gray\")\n",
+    "    plt.title(title, fontsize=12, fontweight=\"bold\")\n",
+    "    plt.axis(\"off\")\n",
+    "    plt.tight_layout()\n",
+    "    plt.show()\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "131a8174",
+   "metadata": {},
+   "source": [
+    "## Q1 · Architecture Choices &nbsp;&nbsp; \n",
+    "\n",
+    "Answer each part in 2–3 sentences.\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "ae4790ed",
+   "metadata": {},
+   "source": [
+    "### Q2(a) · Tanh vs ReLU/Sigmoid in the Generator &nbsp; \n",
+    "\n",
+    "Why does the Generator use **Tanh** as its final activation instead of ReLU or Sigmoid?\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "94a382da",
+   "metadata": {},
+   "source": [
+    "****Tanh** outputs values between **-1 and 1**, which matches the normalized pixel range commonly used in GANs. This helps the generator produce more balanced images and makes training more stable. In contrast, **ReLU** can output unbounded positive values, and **Sigmoid** restricts outputs to **0–1**, which is often less suitable for image generation.\n",
+    "**\n",
+    "\n",
+    "> YOUR ANSWER HERE\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "38f2bd37",
+   "metadata": {},
+   "source": [
+    "### Q2(b) · LeakyReLU in the Discriminator &nbsp;\n",
+    "\n",
+    "Why does the Discriminator use **LeakyReLU** instead of standard ReLU?\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "3ae3679e",
+   "metadata": {},
+   "source": [
+    "**LeakyReLU allows a small, non-zero gradient for negative inputs, so neurons continue learning even when the input is negative. This helps prevent the \"dying ReLU\" problem, where some neurons stop updating completely. As a result, the discriminator learns more effectively and training becomes more stable.**\n",
+    "\n",
+    "> YOUR ANSWER HERE\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "3f3a8b8e",
+   "metadata": {},
+   "source": [
+    "### Q2(c) · DCGAN — Benefits of Convolutions &nbsp; \n",
+    "\n",
+    "DCGAN replaces fully-connected layers with convolutional layers.  \n",
+    "Name **two specific benefits** of this change.\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "1db7055a",
+   "metadata": {},
+   "source": [
+    "**Your Answer:**\n",
+    "\n",
+    "> 1. Better feature extraction: Convolutional layers capture local patterns such as edges, textures, and shapes, which are important for generating and recognizing images.\n",
+    "> 2. Fewer parameters: Convolutional layers use weight sharing, significantly reducing the number of parameters. This makes the model more efficient and helps reduce overfitting.\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "ee3da688",
+   "metadata": {},
+   "source": [
+    "### Q2(d) · No BatchNorm in Discriminator &nbsp; \n",
+    "\n",
+    "Why is **BatchNorm NOT recommended** inside the Discriminator,  \n",
+    "even though it stabilises the Generator?\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "4834425c",
+   "metadata": {},
+   "source": [
+    "**Your Answer:**\n",
+    "\n",
+    "> BatchNorm uses statistics from the entire batch, which can mix information between real and fake samples. This may make it easier for the discriminator to distinguish samples based on batch statistics rather than actual image features. As a result, the discriminator can become less reliable and GAN training may become unstable.\n",
+    "\n",
+    "---\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "8fbae895",
+   "metadata": {},
+   "source": [
+    "## Q3 · Failure Modes &nbsp;&nbsp; \n",
+    "\n",
+    "For each failure mode: describe **(i) what it looks like in practice**, **(ii) the root cause**, and **(iii) one mitigation strategy**.\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "bccfb557",
+   "metadata": {},
+   "source": [
+    "### Q3(a) · Mode Collapse &nbsp; \n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "a7dc52b6",
+   "metadata": {},
+   "source": [
+    "**Your Answer:**\n",
+    "\n",
+    "| | |\n",
+    "|---|---|\n",
+    "| **(i) What it looks like** | The generator produces very similar or identical images regardless of the input noise. |\n",
+    "| **(ii) Root cause** | The generator discovers a few outputs that consistently fool the discriminator and keeps generating only those. |\n",
+    "| **(iii) Mitigation** | Use techniques such as Minibatch Discrimination or Wasserstein GAN (WGAN) to encourage output diversity. |\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "947411dd",
+   "metadata": {},
+   "source": [
+    "### Q3(b) · Vanishing Gradients in the Generator &nbsp; \n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "542e2d5c",
+   "metadata": {},
+   "source": [
+    "**Your Answer:**\n",
+    "\n",
+    "| | |\n",
+    "|---|---|\n",
+    "| **(i) What it looks like** | The generator and discriminator losses fluctuate wildly, and image quality keeps changing without improving. |\n",
+    "| **(ii) Root cause** | The generator and discriminator are competing networks, making optimization unstable. |\n",
+    "| **(iii) Mitigation** | Use Batch Normalization, careful learning-rate tuning, or architectures like DCGAN/WGAN-GP for more stable training. |\n",
+    "\n",
+    "---\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "661e9b8f",
+   "metadata": {},
+   "source": [
+    "## Q4 · Build  Vanilla GAN &nbsp;&nbsp; \n",
+    "You will implement a GAN from scratch and train it on MNIST.  \n",
+    "Follow the exact architecture below — **do not change layer sizes or activations**.\n",
+    "\n",
+    "| Component | Architecture |\n",
+    "|-----------|-------------|\n",
+    "| **Generator input** | Noise $z \\sim \\mathcal{N}(0,1)$, `dim = 100` |\n",
+    "| **Generator hidden** | `Linear(100→256)` + `BatchNorm1d` + `LeakyReLU(0.2)` → `Linear(256→512)` + `BatchNorm1d` + `LeakyReLU(0.2)` → `Linear(512→1024)` + `BatchNorm1d` + `LeakyReLU(0.2)` |\n",
+    "| **Generator output** | `Linear(1024→784)` + `Tanh` |\n",
+    "| **Discriminator input** | Flat image, `dim = 784` |\n",
+    "| **Discriminator hidden** | `Linear(784→512)` + `LeakyReLU(0.2)` + `Dropout(0.3)` → `Linear(512→256)` + `LeakyReLU(0.2)` + `Dropout(0.3)` |\n",
+    "| **Discriminator output** | `Linear(256→1)` + `Sigmoid` |\n",
+    "| **Optimiser (both)** | `Adam`, `lr=0.0002`, `β₁=0.5` |\n",
+    "| **Label smoothing** | Real labels = `0.9`, Fake labels = `0.0` |\n",
+    "| **Batch size** | `128` |\n",
+    "| **Epochs** | `50` |\n",
+    "\n",
+    "> \n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "958ec252",
+   "metadata": {},
+   "source": [
+    "### Step 1 · Load MNIST &nbsp; *(provided — just run)*\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "4b8c87c7",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# ── Hyperparameters ───────────────────────────────────────────────────────────\n",
+    "BATCH_SIZE = 128\n",
+    "IMAGE_SIZE = 784     # 28 × 28\n",
+    "LATENT_DIM = 100\n",
+    "LR         = 0.0002\n",
+    "EPOCHS     = 50\n",
+    "\n",
+    "# ── Dataset ───────────────────────────────────────────────────────────────────\n",
+    "transform = transforms.Compose([\n",
+    "    transforms.ToTensor(),\n",
+    "    transforms.Normalize([0.5], [0.5])   # scale to [-1, 1]\n",
+    "])\n",
+    "\n",
+    "train_dataset = datasets.MNIST(root=\"./data\", train=True,  download=True, transform=transform)\n",
+    "test_dataset  = datasets.MNIST(root=\"./data\", train=False, download=True, transform=transform)\n",
+    "dataloader    = torch.utils.data.DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)\n",
+    "\n",
+    "print(f\"Train: {len(train_dataset):,} images | Test: {len(test_dataset):,} images\")\n",
+    "print(f\"Batches per epoch: {len(dataloader)}\")\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "fe390daa",
+   "metadata": {},
+   "source": [
+    "### Step 2 · Implement the Generator &nbsp; `[5 marks]`\n",
+    "\n",
+    "Complete the `Generator` class. Use the architecture from the table above.\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "8b551d8a",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "class Generator(nn.Module):\n",
+    "    def __init__(self, latent_dim, image_size):\n",
+    "        super().__init__()\n",
+    "\n",
+    "        # ── TODO: Build self.model as an nn.Sequential ────────────────────────\n",
+    "        # Layer order:\n",
+    "        #   block 1: Linear(latent_dim → 256) + BatchNorm1d(256) + LeakyReLU(0.2)\n",
+    "        #   block 2: Linear(256 → 512)        + BatchNorm1d(512) + LeakyReLU(0.2)\n",
+    "        #   block 3: Linear(512 → 1024)       + BatchNorm1d(1024)+ LeakyReLU(0.2)\n",
+    "        #   output : Linear(1024 → image_size) + Tanh\n",
+    "\n",
+    "        self.model = nn.Sequential(\n",
+    "            # nn.Linear(latent_dim, 256),\n",
+    "nn.BatchNorm1d(256),\n",
+    "nn.LeakyReLU(0.2),\n",
+    "\n",
+    "nn.Linear(256, 512),\n",
+    "nn.BatchNorm1d(512),\n",
+    "nn.LeakyReLU(0.2),\n",
+    "\n",
+    "nn.Linear(512, 1024),\n",
+    "nn.BatchNorm1d(1024),\n",
+    "nn.LeakyReLU(0.2),\n",
+    "\n",
+    "nn.Linear(1024, image_size),\n",
+    "nn.Tanh()\n",
+    "        )\n",
+    "\n",
+    "    def forward(self, z):\n",
+    "        return self.model(z)\n",
+    "\n",
+    "\n",
+    "G = Generator(LATENT_DIM, IMAGE_SIZE).to(device)\n",
+    "z_test = torch.randn(4, LATENT_DIM).to(device)\n",
+    "out    = G(z_test)\n",
+    "assert out.shape == (4, IMAGE_SIZE), f\"Expected (4, 784), got {out.shape}\"\n",
+    "print(\"Generator output shape:\", out.shape)\n",
+    "print(\"   Output range:\", round(out.min().item(), 3), \"→\", round(out.max().item(), 3), \"(should be ≈ [-1, 1])\")\n",
+    "print(G)\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "660375e1",
+   "metadata": {},
+   "source": [
+    "### Step 3 · Implement the Discriminator &nbsp; `[5 marks]`\n",
+    "\n",
+    "Complete the `Discriminator` class. Use the architecture from the table above.\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "092be06a",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "class Discriminator(nn.Module):\n",
+    "    def __init__(self, image_size):\n",
+    "        super().__init__()\n",
+    "\n",
+    "        # ── TODO: Build self.model as an nn.Sequential ────────────────────────\n",
+    "        # Layer order:\n",
+    "        #   block 1: Linear(image_size → 512) + LeakyReLU(0.2) + Dropout(0.3)\n",
+    "        #   block 2: Linear(512 → 256)        + LeakyReLU(0.2) + Dropout(0.3)\n",
+    "        #   output : Linear(256 → 1)          + Sigmoid\n",
+    "\n",
+    "        self.model = nn.Sequential(\n",
+    "            nn.Linear(image_size, 512),\n",
+    "nn.LeakyReLU(0.2),\n",
+    "nn.Dropout(0.3),\n",
+    "\n",
+    "nn.Linear(512, 256),\n",
+    "nn.LeakyReLU(0.2),\n",
+    "nn.Dropout(0.3),\n",
+    "\n",
+    "nn.Linear(256, 1),\n",
+    "nn.Sigmoid()\n",
+    "        )\n",
+    "\n",
+    "    def forward(self, x):\n",
+    "        return self.model(x)\n",
+    "\n",
+    "\n",
+    "D = Discriminator(IMAGE_SIZE).to(device)\n",
+    "x_test = torch.randn(4, IMAGE_SIZE).to(device)\n",
+    "pred   = D(x_test)\n",
+    "assert pred.shape == (4, 1), f\"Expected (4, 1), got {pred.shape}\"\n",
+    "print(\"Discriminator output shape:\", pred.shape)\n",
+    "print(\"   Output range:\", round(pred.min().item(), 3), \"→\", round(pred.max().item(), 3), \"(should be in [0, 1])\")\n",
+    "print(D)\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "3b243b52",
+   "metadata": {},
+   "source": [
+    "### Step 4 · Define Loss & Optimisers &nbsp; `[2 marks]`\n",
+    "\n",
+    "Complete the cell below:\n",
+    "- Use `nn.BCELoss()` as the loss function.\n",
+    "- Create an Adam optimiser for G and a separate Adam optimiser for D.\n",
+    "- Use `lr=0.0002` and `betas=(0.5, 0.999)`.\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "ad485d66",
+   "metadata": {},
+   "outputs": [
+    {
+     "ename": "NameError",
+     "evalue": "name 'torch' is not defined",
+     "output_type": "error",
+     "traceback": [
+      "\u001b[1;31m---------------------------------------------------------------------------\u001b[0m",
+      "\u001b[1;31mNameError\u001b[0m                                 Traceback (most recent call last)",
+      "Cell \u001b[1;32mIn[1], line 9\u001b[0m\n\u001b[0;32m      6\u001b[0m \u001b[38;5;28;01mdef\u001b[39;00m \u001b[38;5;21mreal_labels\u001b[39m(n): \u001b[38;5;28;01mreturn\u001b[39;00m torch\u001b[38;5;241m.\u001b[39mfull((n, \u001b[38;5;241m1\u001b[39m), \u001b[38;5;241m0.9\u001b[39m)\u001b[38;5;241m.\u001b[39mto(device)\n\u001b[0;32m      7\u001b[0m \u001b[38;5;28;01mdef\u001b[39;00m \u001b[38;5;21mfake_labels\u001b[39m(n): \u001b[38;5;28;01mreturn\u001b[39;00m torch\u001b[38;5;241m.\u001b[39mzeros(n, \u001b[38;5;241m1\u001b[39m)\u001b[38;5;241m.\u001b[39mto(device)\n\u001b[1;32m----> 9\u001b[0m fixed_noise \u001b[38;5;241m=\u001b[39m \u001b[43mtorch\u001b[49m\u001b[38;5;241m.\u001b[39mrandn(\u001b[38;5;241m64\u001b[39m, LATENT_DIM)\u001b[38;5;241m.\u001b[39mto(device)\n\u001b[0;32m     11\u001b[0m \u001b[38;5;28;01massert\u001b[39;00m criterion \u001b[38;5;129;01mis\u001b[39;00m \u001b[38;5;129;01mnot\u001b[39;00m \u001b[38;5;28;01mNone\u001b[39;00m,   \u001b[38;5;124m\"\u001b[39m\u001b[38;5;124mcriterion is not defined!\u001b[39m\u001b[38;5;124m\"\u001b[39m\n\u001b[0;32m     12\u001b[0m \u001b[38;5;28;01massert\u001b[39;00m optimizer_G \u001b[38;5;129;01mis\u001b[39;00m \u001b[38;5;129;01mnot\u001b[39;00m \u001b[38;5;28;01mNone\u001b[39;00m, \u001b[38;5;124m\"\u001b[39m\u001b[38;5;124moptimizer_G is not defined!\u001b[39m\u001b[38;5;124m\"\u001b[39m\n",
+      "\u001b[1;31mNameError\u001b[0m: name 'torch' is not defined"
+     ]
+    }
+   ],
+   "source": [
+    "criterion = nn.BCELoss()   # YOUR CODE HERE — replace None with nn.BCELoss()\n",
+    "\n",
+    "optimizer_G =torch.optim.Adam(\n",
+    "    G.parameters(),\n",
+    "    lr=0.0002,\n",
+    "    betas=(0.5, 0.999)\n",
+    ")   \n",
+    "optimizer_D =torch.optim.Adam(\n",
+    "    D.parameters(),\n",
+    "    lr=0.0002,\n",
+    "    betas=(0.5, 0.999)\n",
+    ")   \n",
+    "def real_labels(n): return torch.full((n, 1), 0.9).to(device)\n",
+    "def fake_labels(n): return torch.zeros(n, 1).to(device)\n",
+    "\n",
+    "fixed_noise = torch.randn(64, LATENT_DIM).to(device)\n",
+    "\n",
+    "assert criterion is not None,   \"criterion is not defined!\"\n",
+    "assert optimizer_G is not None, \"optimizer_G is not defined!\"\n",
+    "assert optimizer_D is not None, \"optimizer_D is not defined!\"\n",
+    "print(\" Loss and optimisers ready\")\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "32c81840-c68b-4d2d-be60-9829528cb742",
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.13"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
