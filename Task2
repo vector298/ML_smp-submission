@@ -1,0 +1,321 @@
+"""
+MNIST Project - Tasks 1, 2 & 3
+--------------------------------
+Task 1: Training loop
+Task 2: Evaluation
+Task 3: Save, load & reflect
+"""
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.optim.lr_scheduler import StepLR
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader
+import matplotlib.pyplot as plt
+import os
+
+
+
+
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
+
+
+
+
+transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize((0.1307,), (0.3081,))
+])
+
+train_dataset = datasets.MNIST(root='./data', train=True,  download=True, transform=transform)
+test_dataset  = datasets.MNIST(root='./data', train=False, download=True, transform=transform)
+
+train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+test_loader  = DataLoader(test_dataset,  batch_size=64, shuffle=False)
+
+print(f"Training samples : {len(train_dataset)}")
+print(f"Test samples     : {len(test_dataset)}")
+
+
+
+
+class MNISTNet(nn.Module):
+    """
+    Simple fully-connected network for MNIST.
+    Input:  28x28 = 784 pixels (flattened)
+    Output: 10 logits (one per digit class 0-9)
+
+    We do NOT add Softmax here because CrossEntropyLoss
+    applies LogSoftmax internally — adding it again would
+    give wrong results.
+    """
+    def __init__(self):
+        super(MNISTNet, self).__init__()
+        self.network = nn.Sequential(
+            nn.Flatten(),           
+            nn.Linear(784, 256),
+            nn.ReLU(),
+            nn.Dropout(0.25),       
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Dropout(0.25),
+            nn.Linear(128, 10)      
+        )
+
+    def forward(self, x):
+        return self.network(x)
+
+
+model = MNISTNet().to(device)
+print(f"\nModel architecture:\n{model}")
+
+
+criterion = nn.CrossEntropyLoss()
+
+
+
+
+optimizer = optim.Adam(model.parameters(), lr=1e-3)
+
+
+
+
+scheduler = StepLR(optimizer, step_size=2, gamma=0.5)
+
+
+
+# TASK 1: TRAINING LOOP
+
+
+def train(model, device, train_loader, optimizer, criterion, epoch):
+    """
+    Runs one full epoch of training.
+
+    The 5-step gradient descent pattern per batch:
+      1. optimizer.zero_grad()  → clear gradients from last step
+      2. forward pass           → get model predictions
+      3. compute loss           → how wrong are the predictions?
+      4. loss.backward()        → compute gradients via backprop
+      5. optimizer.step()       → update weights using gradients
+
+    WHY zero_grad() first?
+    PyTorch ACCUMULATES gradients by default (useful for RNNs).
+    If you don't zero them, gradients from the previous batch
+    add onto this batch's gradients → wrong updates.
+    """
+    model.train()   # sets model to training mode (enables dropout, batch norm updates)
+
+    total_loss = 0
+    correct = 0
+
+    for batch_idx, (data, target) in enumerate(train_loader):
+        data, target = data.to(device), target.to(device)
+
+        optimizer.zero_grad()
+
+        output = model(data)                        
+
+        loss = criterion(output, target)
+
+        loss.backward()
+
+        optimizer.step()
+
+        total_loss += loss.item()
+        pred = output.argmax(dim=1)                 
+        correct += pred.eq(target).sum().item()
+
+        if batch_idx % 200 == 0:
+            print(f"  Epoch {epoch} | Batch {batch_idx:4d}/{len(train_loader)} "
+                  f"| Loss: {loss.item():.4f}")
+
+    avg_loss = total_loss / len(train_loader)
+    accuracy = 100. * correct / len(train_loader.dataset)
+    return avg_loss, accuracy
+
+
+# TASK 2: EVALUATION
+
+def test(model, device, test_loader, criterion):
+    """
+    Evaluates the model on data it has never seen during training.
+
+    Two key differences from training:
+
+    model.eval()
+    ─────────────
+    Switches model to evaluation mode. This:
+    - DISABLES dropout (all neurons active, deterministic output)
+    - FREEZES batch norm (uses running stats, not batch stats)
+    Without this, your test results would be random due to dropout.
+
+    torch.no_grad()
+    ───────────────
+    Tells PyTorch not to build the computation graph.
+    During evaluation we don't call loss.backward(), so we don't
+    need gradients. This saves memory and speeds up inference.
+    """
+    model.eval()
+
+    total_loss = 0
+    correct = 0
+
+    with torch.no_grad():                           
+        for data, target in test_loader:
+            data, target = data.to(device), target.to(device)
+
+            output = model(data)
+            loss = criterion(output, target)
+
+            total_loss += loss.item()
+            pred = output.argmax(dim=1)
+            correct += pred.eq(target).sum().item()
+
+    avg_loss = total_loss / len(test_loader)
+    accuracy = 100. * correct / len(test_loader.dataset)
+
+    print(f"  Test  → Avg Loss: {avg_loss:.4f} | Accuracy: {correct}/{len(test_loader.dataset)} "
+          f"({accuracy:.2f}%)")
+
+    return avg_loss, accuracy
+
+
+
+# TRAINING ACROSS EPOCHS
+
+EPOCHS = 5
+
+train_losses = []
+train_accuracies = []
+test_losses = []
+test_accuracies = []
+
+print("\n" + "="*60)
+print("Starting training...")
+print("="*60)
+
+for epoch in range(1, EPOCHS + 1):
+    print(f"\nEpoch {epoch}/{EPOCHS}  (lr: {scheduler.get_last_lr()[0]:.6f})")
+
+    
+    tr_loss, tr_acc = train(model, device, train_loader, optimizer, criterion, epoch)
+
+    te_loss, te_acc = test(model, device, test_loader, criterion)
+
+    scheduler.step()
+
+    train_losses.append(tr_loss)
+    train_accuracies.append(tr_acc)
+    test_losses.append(te_loss)
+    test_accuracies.append(te_acc)
+
+    print(f"  Train → Avg Loss: {tr_loss:.4f} | Accuracy: {tr_acc:.2f}%")
+
+    if epoch > 1:
+        if test_accuracies[-1] < test_accuracies[-2] - 0.5:
+            print("  ⚠ Warning: test accuracy dropped — possible overfitting")
+
+
+# TASK 3: SAVE MODEL
+
+save_path = "mnist_model.pt"
+torch.save(model.state_dict(), save_path)
+print(f"\nModel saved to {save_path}")
+
+
+# TASK 3: LOAD MODEL & RUN INFERENCE
+
+def load_and_infer(model_path, device):
+    """
+    Loads a saved model from disk and runs inference on one sample image.
+    This simulates what you'd do in a real deployment script.
+    """
+    loaded_model = MNISTNet().to(device)
+
+    loaded_model.load_state_dict(torch.load(model_path, map_location=device))
+
+    loaded_model.eval()
+
+    sample_image, true_label = test_dataset[0]
+    sample_image = sample_image.unsqueeze(0).to(device)  
+
+    with torch.no_grad():
+        output = loaded_model(sample_image)             
+        probabilities = torch.softmax(output, dim=1)     
+        predicted = output.argmax(dim=1).item()
+
+    print(f"\nInference on sample image:")
+    print(f"  True label  : {true_label}")
+    print(f"  Predicted   : {predicted}")
+    print(f"  Confidence  : {probabilities[0][predicted].item()*100:.2f}%")
+    print(f"  Correct     : {'✓' if predicted == true_label else '✗'}")
+
+    return sample_image, true_label, predicted, probabilities
+
+sample_image, true_label, predicted, probabilities = load_and_infer(save_path, device)
+
+
+# ──────────────────────────────────────────────
+# TASK 3: PLOT TRAINING CURVES
+# ──────────────────────────────────────────────
+
+epochs_range = range(1, EPOCHS + 1)
+
+fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+fig.suptitle("MNIST Training Results", fontsize=14, fontweight='bold')
+
+# Plot 1: Loss curves
+axes[0].plot(epochs_range, train_losses, 'b-o', label='Train loss')
+axes[0].plot(epochs_range, test_losses,  'r-o', label='Test loss')
+axes[0].set_title("Loss over epochs")
+axes[0].set_xlabel("Epoch")
+axes[0].set_ylabel("Loss")
+axes[0].legend()
+axes[0].grid(True, alpha=0.3)
+
+# Plot 2: Accuracy curves
+axes[1].plot(epochs_range, train_accuracies, 'b-o', label='Train accuracy')
+axes[1].plot(epochs_range, test_accuracies,  'r-o', label='Test accuracy')
+axes[1].set_title("Accuracy over epochs")
+axes[1].set_xlabel("Epoch")
+axes[1].set_ylabel("Accuracy (%)")
+axes[1].legend()
+axes[1].grid(True, alpha=0.3)
+
+# Plot 3: Sample image + prediction
+img = sample_image.squeeze().cpu().numpy()
+axes[2].imshow(img, cmap='gray')
+axes[2].set_title(f"Sample — True: {true_label} | Pred: {predicted}")
+axes[2].axis('off')
+
+plt.tight_layout()
+plt.savefig("mnist_results.png", dpi=120, bbox_inches='tight')
+print("\nPlot saved to mnist_results.png")
+
+# Print final summary
+print("\n" + "="*60)
+print("FINAL RESULTS")
+print("="*60)
+print(f"Final train accuracy : {train_accuracies[-1]:.2f}%")
+print(f"Final test accuracy  : {test_accuracies[-1]:.2f}%")
+print(f"Model saved to       : {save_path}")
+print(f"Plot saved to        : mnist_results.png")
+
+"""
+REFLECTION
+──────────
+What would improve accuracy further?
+1. Add BatchNorm layers between linear layers — stabilizes training
+2. Use a CNN instead of fully-connected layers — better for image data
+   since it captures spatial relationships between pixels
+3. Increase epochs with a better LR schedule (cosine annealing)
+4. Data augmentation: random rotation, shifts on training images
+5. Increase model width (more neurons per layer)
+
+The current architecture hits ~98-99% which is solid for a 
+fully-connected network on MNIST. A simple CNN would push to 99.5%+.
+"""
