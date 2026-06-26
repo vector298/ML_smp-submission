@@ -1,0 +1,336 @@
+import os
+import math
+import torch
+import torch.nn as nn
+import numpy as np
+import matplotlib.pyplot as plt
+import tiktoken
+from dataclasses import dataclass
+from datasets import load_dataset
+
+
+# ============================================================
+# TASK 1 — Understand Language Models & Load TinyStories
+# ============================================================
+
+ds = load_dataset("roneneldan/TinyStories")
+print(ds)
+print(ds["train"][0])
+print(ds["train"][1])
+print(ds["train"][2])
+
+
+# ============================================================
+# TASK 2 — Tokenize the Dataset & Save to Binary
+# ============================================================
+
+RUN_TOKENIZATION = False
+
+if RUN_TOKENIZATION:
+    enc = tiktoken.get_encoding("gpt2")
+
+    sample = "Once upon a time"
+    ids = enc.encode(sample)
+    print(ids)
+    print(enc.decode(ids))
+
+    def tokenize(example):
+        ids = enc.encode(example["text"])
+        ids.append(enc.eot_token)
+        return {"ids": ids, "len": len(ids)}
+
+    tokenized = ds.map(tokenize, remove_columns=["text"])
+
+    for split, dset in tokenized.items():
+        arr_len = sum(dset["len"])
+        filename = f"{split}.bin"
+        arr = np.memmap(filename, dtype=np.uint16, mode="w+", shape=(arr_len,))
+        idx = 0
+        for example in dset:
+            arr[idx : idx + example["len"]] = example["ids"]
+            idx += example["len"]
+        arr.flush()
+        print(f"Saved {filename} with {arr_len} tokens")
+
+enc = tiktoken.get_encoding("gpt2")
+data = np.memmap("train.bin", dtype=np.uint16, mode="r")
+print(f"Total train tokens: {len(data)}")
+print(enc.decode(data[:50].tolist()))
+
+
+# ============================================================
+# TASK 3 — Build the Data Loader
+# ============================================================
+
+block_size = 128
+batch_size = 32
+device = (
+    "cuda" if torch.cuda.is_available()
+    else "mps" if torch.backends.mps.is_available()
+    else "cpu"
+)
+print(f"Using device: {device}")
+
+def get_batch(split):
+    data = np.memmap(f"{split}.bin", dtype=np.uint16, mode="r")
+    ix = torch.randint(len(data) - block_size, (batch_size,))
+    x = torch.stack([torch.from_numpy(data[i     : i + block_size    ].astype(np.int64)) for i in ix])
+    y = torch.stack([torch.from_numpy(data[i + 1 : i + block_size + 1].astype(np.int64)) for i in ix])
+    return x.to(device), y.to(device)
+
+x, y = get_batch("train")
+print(x.shape, y.shape)
+print("x[0, :5]:", x[0, :5])
+print("y[0, :5]:", y[0, :5])
+
+
+# ============================================================
+# TASK 4 — Design the Transformer Model Architecture
+# ============================================================
+
+@dataclass
+class GPTConfig:
+    vocab_size: int = 50257
+    block_size: int = 128
+    n_layer: int    = 4
+    n_head: int     = 4
+    n_embd: int     = 128
+    dropout: float  = 0.1
+
+cfg = GPTConfig()
+
+
+class CausalSelfAttention(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.c_attn = nn.Linear(cfg.n_embd, 3 * cfg.n_embd)
+        self.c_proj = nn.Linear(cfg.n_embd, cfg.n_embd)
+        self.drop   = nn.Dropout(cfg.dropout)
+        self.n_head = cfg.n_head
+        self.n_embd = cfg.n_embd
+        self.register_buffer(
+            "bias",
+            torch.tril(torch.ones(cfg.block_size, cfg.block_size))
+                  .view(1, 1, cfg.block_size, cfg.block_size)
+        )
+
+    def forward(self, x):
+        B, T, C = x.shape
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+        nh, hs  = self.n_head, C // self.n_head
+        q = q.view(B, T, nh, hs).transpose(1, 2)
+        k = k.view(B, T, nh, hs).transpose(1, 2)
+        v = v.view(B, T, nh, hs).transpose(1, 2)
+        att = (q @ k.transpose(-2, -1)) / (hs ** 0.5)
+        att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
+        att = torch.softmax(att, dim=-1)
+        att = self.drop(att)
+        y   = (att @ v).transpose(1, 2).contiguous().view(B, T, C)
+        return self.c_proj(y)
+
+
+class MLP(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(cfg.n_embd, 4 * cfg.n_embd),
+            nn.GELU(),
+            nn.Linear(4 * cfg.n_embd, cfg.n_embd),
+            nn.Dropout(cfg.dropout),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class Block(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.ln1  = nn.LayerNorm(cfg.n_embd)
+        self.attn = CausalSelfAttention(cfg)
+        self.ln2  = nn.LayerNorm(cfg.n_embd)
+        self.mlp  = MLP(cfg)
+
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.mlp(self.ln2(x))
+        return x
+
+
+class GPT(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg     = cfg
+        self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.n_embd)
+        self.pos_emb = nn.Embedding(cfg.block_size, cfg.n_embd)
+        self.drop    = nn.Dropout(cfg.dropout)
+        self.blocks  = nn.Sequential(*[Block(cfg) for _ in range(cfg.n_layer)])
+        self.ln_f    = nn.LayerNorm(cfg.n_embd)
+        self.head    = nn.Linear(cfg.n_embd, cfg.vocab_size, bias=False)
+
+    def forward(self, idx, targets=None):
+        B, T = idx.shape
+        pos  = torch.arange(T, device=idx.device)
+        x    = self.drop(self.tok_emb(idx) + self.pos_emb(pos))
+        x    = self.blocks(x)
+        x    = self.ln_f(x)
+        logits = self.head(x)
+        loss   = None
+        if targets is not None:
+            loss = nn.functional.cross_entropy(
+                logits.view(-1, logits.size(-1)), targets.view(-1)
+            )
+        return logits, loss
+
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens, temperature=1.0):
+        for _ in range(max_new_tokens):
+            idx_cond      = idx[:, -self.cfg.block_size:]
+            logits, _     = self(idx_cond)
+            logits        = logits[:, -1, :] / temperature
+            probs         = torch.softmax(logits, dim=-1)
+            next_id       = torch.multinomial(probs, num_samples=1)
+            idx           = torch.cat([idx, next_id], dim=1)
+        return idx
+
+
+model = GPT(cfg).to(device)
+dummy = torch.zeros((2, 128), dtype=torch.long, device=device)
+logits, _ = model(dummy)
+print("Output shape:", logits.shape)
+print(f"Total parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
+
+
+# ============================================================
+# TASK 5 — Set Up Training Configuration
+# ============================================================
+
+max_iters = 5000
+
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.1)
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_iters, eta_min=1e-5)
+
+print(f"Initial LR: {optimizer.param_groups[0]['lr']}")
+
+x, y   = get_batch("train")
+_, loss = model(x, y)
+loss.backward()
+torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+optimizer.step()
+scheduler.step()
+optimizer.zero_grad()
+
+print(f"LR after one step: {optimizer.param_groups[0]['lr']}")
+
+
+# ============================================================
+# TASK 6 — Pre-train the SLM
+# ============================================================
+
+model     = GPT(cfg).to(device)
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.1)
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_iters, eta_min=1e-5)
+
+eval_interval = 500
+eval_iters    = 50
+best_val_loss = float("inf")
+train_losses  = []
+val_losses    = []
+
+@torch.no_grad()
+def estimate_loss():
+    model.eval()
+    out = {}
+    for split in ["train", "val"]:
+        losses = []
+        for _ in range(eval_iters):
+            x, y = get_batch(split)
+            _, loss = model(x, y)
+            losses.append(loss.item())
+        out[split] = sum(losses) / len(losses)
+    model.train()
+    return out
+
+model.train()
+for it in range(max_iters):
+    x, y    = get_batch("train")
+    _, loss = model(x, y)
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    optimizer.step()
+    scheduler.step()
+    optimizer.zero_grad()
+
+    if it % eval_interval == 0 or it == max_iters - 1:
+        stats = estimate_loss()
+        print(f"iter {it:4d} | train loss {stats['train']:.4f} | val loss {stats['val']:.4f}")
+        train_losses.append(stats["train"])
+        val_losses.append(stats["val"])
+        if stats["val"] < best_val_loss:
+            best_val_loss = stats["val"]
+            torch.save(model.state_dict(), "best_model.pt")
+            print(f"  -> checkpoint saved (val loss {best_val_loss:.4f})")
+
+plt.figure(figsize=(8, 5))
+plt.plot(train_losses, label="train")
+plt.plot(val_losses,   label="val")
+plt.xlabel("Eval step")
+plt.ylabel("Loss")
+plt.title("Training Curve")
+plt.legend()
+plt.tight_layout()
+plt.savefig("loss_curve.png")
+plt.show()
+
+
+# ============================================================
+# TASK 7 — Evaluate the Model
+# ============================================================
+
+model.load_state_dict(torch.load("best_model.pt", map_location=device))
+model.eval()
+
+@torch.no_grad()
+def estimate_loss_eval(eval_iters=100):
+    losses = []
+    for _ in range(eval_iters):
+        x, y = get_batch("val")
+        _, loss = model(x, y)
+        losses.append(loss.item())
+    return sum(losses) / len(losses)
+
+val_loss   = estimate_loss_eval()
+perplexity = math.exp(val_loss)
+print(f"Val loss:   {val_loss:.4f}")
+print(f"Perplexity: {perplexity:.2f}")
+
+
+# ============================================================
+# TASK 8 — Run Inference & Generate Text
+# ============================================================
+
+model.load_state_dict(torch.load("best_model.pt", map_location=device))
+model.eval()
+
+enc = tiktoken.get_encoding("gpt2")
+
+def generate_text(prompt, max_new_tokens=150, temperature=1.0):
+    ids  = enc.encode(prompt)
+    x    = torch.tensor(ids, dtype=torch.long, device=device).unsqueeze(0)
+    out  = model.generate(x, max_new_tokens=max_new_tokens, temperature=temperature)
+    return enc.decode(out[0].tolist())
+
+prompts = [
+    "Once upon a time",
+    "The little girl went to",
+    "In a small village",
+    "One sunny morning",
+]
+
+for prompt in prompts:
+    print(f"\n--- Prompt: '{prompt}' | temp=0.7 ---")
+    print(generate_text(prompt, temperature=0.7))
+
+for prompt in prompts[:2]:
+    print(f"\n--- Prompt: '{prompt}' | temp=1.4 ---")
+    print(generate_text(prompt, temperature=1.4))
